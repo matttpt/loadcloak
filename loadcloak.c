@@ -379,6 +379,89 @@ static void start_timer(const struct loadavg_timing *timing,
 }
 
 ////////////////////////////////////////////////////////////////////////
+// PROPAGATION OF SIGINT AND SIGTERM TO CHILD PROCESSES               //
+////////////////////////////////////////////////////////////////////////
+
+// The process group to propagate signals to.
+static pid_t signal_propagation_pgrp;
+
+// A signal-safe subroutine to print errors if the signal propagation
+// handler fails.
+static void signal_propagation_error(const char *message) {
+    write(STDOUT_FILENO, message, strlen(message));
+    write(STDOUT_FILENO, "\n", 1);
+}
+
+// A signal handler to pass on SIGINT and SIGTERM to the target process
+// group. This should be signal-safe (note that kill(), signal(),
+// raise(), and signal_propagation_error() all are).
+static void propagate_signal_handler(int signal_num)
+{
+    // Note: ESRCH means that the group doesn't exist. We're okay with
+    // that.
+    if (kill(-signal_propagation_pgrp, signal_num) != 0
+        && errno != ESRCH) {
+        signal_propagation_error(
+            "kill failed in SIGINT/SIGTERM handler");
+    }
+
+    // In order to quit while still recording that we were terminated by
+    // the signal, we reset the signal handler to the default and
+    // re-raise the signal. (This is what the glibc documentation
+    // recommends.)
+    signal(signal_num, SIG_DFL);
+    raise(signal_num);
+}
+
+// Installs the above signal handlers to propagate SIGINT and SIGTERM
+// to the specified process group. Note that this modifies global state!
+static void propagate_int_and_term(pid_t pgrp)
+{
+    signal_propagation_pgrp = pgrp;
+
+    struct sigaction propagate_action = {
+        .sa_handler = &propagate_signal_handler,
+        .sa_flags = 0,
+    };
+    sigemptyset(&propagate_action.sa_mask);
+    if (sigaction(SIGINT, &propagate_action, NULL) != 0
+        || sigaction(SIGTERM, &propagate_action, NULL) != 0) {
+        perror("sigaction");
+    }
+}
+
+// The following are used to block SIGINT and SIGTERM before the fork in
+// main() until the signal handler is installed. See the comments there
+// for why this is necessary.
+
+static void set_sigset_to_int_and_term(sigset_t *set)
+{
+    sigemptyset(set);
+    sigaddset(set, SIGINT);
+    sigaddset(set, SIGTERM);
+}
+
+static void block_int_and_term(void)
+{
+    sigset_t set;
+    set_sigset_to_int_and_term(&set);
+    if (sigprocmask(SIG_BLOCK, &set, NULL) != 0) {
+        perror("sigprocmask");
+        exit(EXIT_FAILURE);
+    }
+}
+
+static void unblock_int_and_term(void)
+{
+    sigset_t set;
+    set_sigset_to_int_and_term(&set);
+    if (sigprocmask(SIG_UNBLOCK, &set, NULL) != 0) {
+        perror("sigprocmask");
+        exit(EXIT_FAILURE);
+    }
+}
+
+////////////////////////////////////////////////////////////////////////
 // PROGRAM ENTRY POINT                                                //
 ////////////////////////////////////////////////////////////////////////
 
@@ -395,6 +478,20 @@ int main(int argc, char *argv[])
     printf("found load-average update interval: %d ms\n",
            timing.interval);
 
+    // We will install a SIGINT/SIGTERM handler to propagate those
+    // signals to our children before we terminate, but we need to know
+    // the PID of the child to set that up (so that we know which
+    // process group to forward the signals to). Hence this must occur
+    // after we fork. But if SIGINT or SIGTERM arrive between the fork
+    // and the installation of the signal handler
+    // (propogate_int_and_term()), the default signal handler will run,
+    // quitting without trying to terminate the children. Therefore, we
+    // block SIGINT and SIGTERM until the handler is installed.
+    //
+    // Because signal masks are inherited, these will need to be
+    // unblocked in the child, too.
+    block_int_and_term();
+
     pid_t child_pid = fork();
     if (child_pid < 0) {
         perror("fork");
@@ -404,6 +501,7 @@ int main(int argc, char *argv[])
         // shares our PID) so that the parent process can easily send
         // SIGSTOP and SIGCONT to any and all processes that the shell
         // we execute may start.
+        unblock_int_and_term();
         if (setpgid(0, 0) != 0) {
             perror("setpgid");
             return EXIT_FAILURE;
@@ -412,13 +510,16 @@ int main(int argc, char *argv[])
         perror("execl");
         return EXIT_FAILURE;
     } else {
-        // We are the parent process. We configure the timer to start
-        // and stop the child process's group based on the timing
-        // information we've gleaned about load-average updates. Then
-        // all that is left to do in the main thread of execution is to
-        // wait for our children to exit.
+        // We are the parent process. First, we install a signal handler
+        // to forward SIGINT and SIGTERM to the child's process group.
+        propagate_int_and_term(child_pid);
+        unblock_int_and_term();
+
+        // Configure the timer to start and stop the child's group based
+        // on the timing information we found.
         start_timer(&timing, child_pid);
 
+        // Wait for all children to exit.
         for (;;) {
             int wait_status;
             pid_t wait_result = wait(&wait_status);
