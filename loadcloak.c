@@ -379,29 +379,38 @@ static void start_timer(const struct loadavg_timing *timing,
 }
 
 ////////////////////////////////////////////////////////////////////////
-// PROPAGATION OF SIGINT AND SIGTERM TO CHILD PROCESSES               //
+// TERMINATION OF CHILD PROCESSES ON SIGINT OR SIGTERM                //
 ////////////////////////////////////////////////////////////////////////
 
-// The process group to propagate signals to.
-static pid_t signal_propagation_pgrp;
+// The process group to terminate.
+static pid_t termination_pgrp;
 
 // A signal-safe subroutine to print errors if the signal propagation
 // handler fails.
-static void signal_propagation_error(const char *message) {
+static void termination_handler_error(const char *message) {
     write(STDOUT_FILENO, message, strlen(message));
     write(STDOUT_FILENO, "\n", 1);
 }
 
-// A signal handler to pass on SIGINT and SIGTERM to the target process
-// group. This should be signal-safe (note that kill(), signal(),
-// raise(), and signal_propagation_error() all are).
-static void propagate_signal_handler(int signal_num)
+// A signal handler to send SIGTERM to the target process group when we
+// receive SIGINT or SIGTERM. This should be signal-safe (note that
+// kill(), signal(), raise(), and termination_handler_error() all are)
+//
+// Why not just propagate the signal we receive (i.e. send SIGINT
+// instead of SIGTERM when we receive SIGINT)? It turns out that
+// non-interactive shells set the background processes they spawn to
+// ignore SIGINT. It made sense in the era before job control (so that
+// Ctrl+C would not kill background processes), but for our purposes we
+// want to terminate everything. Ergo, we send SIGTERM in all cases.
+//
+// (See https://unix.stackexchange.com/a/356480)
+static void termination_handler(int signal_num)
 {
     // Note: ESRCH means that the group doesn't exist. We're okay with
     // that.
-    if (kill(-signal_propagation_pgrp, signal_num) != 0
+    if (kill(-termination_pgrp, SIGTERM) != 0
         && errno != ESRCH) {
-        signal_propagation_error(
+        termination_handler_error(
             "kill failed in SIGINT/SIGTERM handler");
     }
 
@@ -413,14 +422,15 @@ static void propagate_signal_handler(int signal_num)
     raise(signal_num);
 }
 
-// Installs the above signal handlers to propagate SIGINT and SIGTERM
-// to the specified process group. Note that this modifies global state!
-static void propagate_int_and_term(pid_t pgrp)
+// Installs the above signal handlers to terminate the specified process
+// group when we receive SIGINT and SIGTERM. Note that this modifies
+// global state!
+static void terminate_pgrp_on_int_and_term(pid_t pgrp)
 {
-    signal_propagation_pgrp = pgrp;
+    termination_pgrp = pgrp;
 
     struct sigaction propagate_action = {
-        .sa_handler = &propagate_signal_handler,
+        .sa_handler = &termination_handler,
         .sa_flags = 0,
     };
     sigemptyset(&propagate_action.sa_mask);
@@ -511,8 +521,9 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     } else {
         // We are the parent process. First, we install a signal handler
-        // to forward SIGINT and SIGTERM to the child's process group.
-        propagate_int_and_term(child_pid);
+        // to terminate the child's process group when we receive SIGINT
+        // or SIGTERM.
+        terminate_pgrp_on_int_and_term(child_pid);
         unblock_int_and_term();
 
         // Configure the timer to start and stop the child's group based
