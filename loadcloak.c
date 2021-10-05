@@ -363,7 +363,8 @@ static void start_timer(const struct loadavg_timing *timing,
     };
     if (timer_create(CLOCK_MONOTONIC,
                      &timer_event,
-                     &timer.posix_timer) != 0) {
+                     &timer.posix_timer) != 0)
+    {
         perror("timer_create");
         exit(EXIT_FAILURE);
     }
@@ -409,7 +410,8 @@ static void termination_handler(int signal_num)
     // Note: ESRCH means that the group doesn't exist. We're okay with
     // that.
     if (kill(-termination_pgrp, SIGTERM) != 0
-        && errno != ESRCH) {
+        && errno != ESRCH)
+    {
         termination_handler_error(
             "kill failed in SIGINT/SIGTERM handler");
     }
@@ -435,7 +437,8 @@ static void terminate_pgrp_on_int_and_term(pid_t pgrp)
     };
     sigemptyset(&propagate_action.sa_mask);
     if (sigaction(SIGINT, &propagate_action, NULL) != 0
-        || sigaction(SIGTERM, &propagate_action, NULL) != 0) {
+        || sigaction(SIGTERM, &propagate_action, NULL) != 0)
+    {
         perror("sigaction");
     }
 }
@@ -536,7 +539,8 @@ int main(int argc, char *argv[])
             pid_t wait_result = wait(&wait_status);
             if (wait_result >= 0) {
                 if (WIFEXITED(wait_status)
-                    && WEXITSTATUS(wait_status) != 0) {
+                    && WEXITSTATUS(wait_status) != 0)
+                {
                     fprintf(stderr,
                             "warning: child %d exited with status %d\n",
                             (int) wait_result,
