@@ -440,6 +440,7 @@ static void terminate_pgrp_on_int_and_term(pid_t pgrp)
         || sigaction(SIGTERM, &propagate_action, NULL) != 0)
     {
         perror("sigaction");
+        exit(EXIT_FAILURE);
     }
 }
 
